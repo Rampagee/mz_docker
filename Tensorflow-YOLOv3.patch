@@ -1,0 +1,535 @@
+diff --git a/Makefile b/Makefile
+index eff2fcf..8435cb2 100644
+--- a/Makefile
++++ b/Makefile
+@@ -3,7 +3,12 @@ NAME := core
+ .PHONY: install clean
+ 
+ install:
+-	@python3 -m pip install -r requirements.txt
++	@python3 -m pip install --user -r requirements.txt
++
++get-model:
++	@curl https://pjreddie.com/media/files/yolov3.weights > ./weights/yolov3.weights
++	@curl https://pjreddie.com/media/files/yolov3-tiny.weights > ./weights/yolov3-tiny.weights
++	@python3 convert_weights.py && python3 convert_weights.py --tiny
+ 
+ clean:
+ 	@python3 setup.py clean
+diff --git a/core/yolo.py b/core/yolo.py
+index 5d581aa..20015ad 100644
+--- a/core/yolo.py
++++ b/core/yolo.py
+@@ -126,8 +126,6 @@ class YOLOv3(object):
+       if self.data_format == 'channels_first':
+         inputs = tf.transpose(inputs, [0, 3, 1, 2])
+ 
+-      inputs = inputs / 255
+-
+       inputs, route2, route4 = darknet53(inputs, data_format=self.data_format)
+ 
+       inputs, route1 = feature_pyramid_network(inputs, filters=512, data_format=self.data_format)
+diff --git a/core/yolo_tiny.py b/core/yolo_tiny.py
+index 50f538b..5290e90 100644
+--- a/core/yolo_tiny.py
++++ b/core/yolo_tiny.py
+@@ -77,8 +77,6 @@ class YOLOv3_tiny(object):
+       if self.data_format == 'channels_first':
+         inputs = tf.transpose(inputs, [0, 3, 1, 2])
+ 
+-      inputs = inputs / 255
+-
+       inputs, route2 = darknet(inputs, data_format=self.data_format)
+       inputs, route1 = feature_pyramid_network(inputs, data_format=self.data_format)
+       detect1 = yolo_layer(inputs,
+diff --git a/detect.py b/detect.py
+index b105b6f..f771c8a 100644
+--- a/detect.py
++++ b/detect.py
+@@ -6,7 +6,11 @@ from core.utils import load_class_names, load_image, draw_boxes, draw_boxes_fram
+ from core.yolo_tiny import YOLOv3_tiny
+ from core.yolo import YOLOv3
+ 
+-def main(mode, tiny, iou_threshold, confidence_threshold, path):
++import re
++import mipso_custom
++import time
++
++def main(mode, tiny, iou_threshold, confidence_threshold, path, freeze, usefrozen, out_file, loop):
+   class_names, n_classes = load_class_names()
+   if tiny:
+     model = YOLOv3_tiny(n_classes=n_classes,
+@@ -16,41 +20,169 @@ def main(mode, tiny, iou_threshold, confidence_threshold, path):
+     model = YOLOv3(n_classes=n_classes,
+                    iou_threshold=iou_threshold,
+                    confidence_threshold=confidence_threshold)
++
++  if usefrozen:
++     inputs, detections, sess, outputs = get_session_from_frozen(tiny,model)
++  else:
++     inputs, detections, sess = get_session(tiny,model)
++
++  if mode == 'image':
++     image = load_image(path, input_size=model.input_size)
++     image /= 255
++     result = sess.run(detections, feed_dict={inputs: image})
++     if usefrozen:
++        dict = {sess.graph.get_tensor_by_name('zebra_output_0:0') : result[0][0],
++                sess.graph.get_tensor_by_name('zebra_output_1:0') : result[0][1]}
++        if not tiny:
++          dict[sess.graph.get_tensor_by_name('zebra_output_2:0')] = result[0][2]
++        result = sess.run(outputs, feed_dict=dict)
++     draw_boxes(path, boxes_dict=result[0], class_names=class_names, input_size=model.input_size)
++     if freeze:
++       gd = sess.graph.as_graph_def()
++       output_path = 'tiny-frozen.pb' if tiny else 'frozen.pb'
++       output_graph_def = tf.graph_util.convert_variables_to_constants(sess, gd, [detections[0][node].name[:-2] for node in detections[0]])
++       tf.train.write_graph(output_graph_def, './', output_path , as_text=False)
++     return
++
++  firstShow = True
++  video = mipso_custom.mipso_opencv_capture(path)[0]
++  inf_name = "TF {}YoloV3".format("Tiny-" if tiny else "")
++  fourcc = cv2.VideoWriter_fourcc(*'XVID')
++  fps = video.get(cv2.CAP_PROP_FPS)
++  frame_size = (int(video.get(cv2.CAP_PROP_FRAME_WIDTH)), int(video.get(cv2.CAP_PROP_FRAME_HEIGHT)))
++  if out_file:
++    out = cv2.VideoWriter(out_file, fourcc, fps, frame_size)
++    print("Video being saved at \"" + out_file + "\"")
++  print("Press 'ESC' to quit")
++  while True:
++    retval, frame = video.read()
++    if not retval:
++      if loop:
++        video.set(cv2.CAP_PROP_POS_FRAMES, 0)
++        print("Reached last frame of video, starting over")
++        continue
++      else:
++        break
++    start_inf = time.time()
++    resized_frame = cv2.resize(frame, dsize=tuple((x) for x in model.input_size[::-1]), interpolation=cv2.INTER_NEAREST)
++    result = sess.run(detections, feed_dict={inputs: [resized_frame / 255]})
++    if usefrozen:
++       dict = {sess.graph.get_tensor_by_name('zebra_output_0:0') : result[0][0],
++                sess.graph.get_tensor_by_name('zebra_output_1:0') : result[0][1]}
++       if not tiny:
++          dict[sess.graph.get_tensor_by_name('zebra_output_2:0')] = result[0][2]
++       result = sess.run(outputs, feed_dict=dict)
++    took_inf = time.time() - start_inf
++    draw_boxes_frame(frame, frame_size, result, class_names, model.input_size)
++    mipso_custom.mipso_window_info(frame, 0, inf_name, took_inf)
++    if out_file:
++      out.write(frame)
++    else:
++      if firstShow:
++        height, width, _ = frame.shape
++        mipso_custom.mipso_window_init(0, width, height)
++        firstShow = False
++      cv2.imshow("0", frame)
++      choice = cv2.waitKey(1)
++      choice = mipso_custom.mipso_process_key(choice)
++      if choice == 27:
++        break
++  cv2.destroyAllWindows()
++  video.release()
++
++def get_session(tiny, model):
+   inputs = tf.placeholder(tf.float32, [1, *model.input_size, 3])
+   detections = model(inputs)
+   saver = tf.train.Saver(tf.global_variables(scope=model.scope))
++  sess = tf.Session()
++  saver.restore(sess, './weights/model-tiny.ckpt' if tiny else './weights/model.ckpt')
+ 
+-  with tf.Session() as sess:
+-    saver.restore(sess, './weights/model-tiny.ckpt' if tiny else './weights/model.ckpt')
+-
+-    if mode == 'image':
+-      image = load_image(path, input_size=model.input_size)
+-      result = sess.run(detections, feed_dict={inputs: image})
+-      draw_boxes(path, boxes_dict=result[0], class_names=class_names, input_size=model.input_size)
+-      return
+-
+-    cv2.namedWindow("Detections")
+-    video = cv2.VideoCapture(path)
+-    fourcc = int(video.get(cv2.CAP_PROP_FOURCC))
+-    fps = video.get(cv2.CAP_PROP_FPS)
+-    frame_size = (int(video.get(cv2.CAP_PROP_FRAME_WIDTH)), int(video.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+-    out = cv2.VideoWriter('./detections/video_output.mp4', fourcc, fps, frame_size)
+-    print("Video being saved at \"" + './detections/video_output.mp4' + "\"")
+-    print("Press 'q' to quit")
+-    while True:
+-      retval, frame = video.read()
+-      if not retval:
+-        break
+-      resized_frame = cv2.resize(frame, dsize=tuple((x) for x in model.input_size[::-1]), interpolation=cv2.INTER_NEAREST)
+-      result = sess.run(detections, feed_dict={inputs: [resized_frame]})
+-      draw_boxes_frame(frame, frame_size, result, class_names, model.input_size)
+-      cv2.imshow("Detections", frame)
+-      key = cv2.waitKey(1) & 0xFF
+-      if key == ord('q'):
+-          break
+-      out.write(frame)
+-    cv2.destroyAllWindows()
+-    video.release()
++  return inputs, detections, sess
++
++def get_session_from_frozen(tiny, model):
++  graph = load_graph(tiny)
++  sess = tf.Session(graph=graph)
++  tensor_base = 'yolov3_tiny' if tiny else 'yolov3'
++  with graph.as_default():
++    inputs = sess.graph.get_tensor_by_name("Placeholder:0")
++    list_outputs = [ sess.graph.get_tensor_by_name(tensor_base+"/Reshape:0"),
++                     sess.graph.get_tensor_by_name(tensor_base+"/Reshape_4:0")]
++    if not tiny:
++      list_outputs.append( sess.graph.get_tensor_by_name(tensor_base+"/Reshape_8:0"))
++    detections = [ dict(enumerate(list_outputs)) ]
++    # find all final outputs
++    full_outputs = _get_output_layers(sess.graph.as_graph_def())
++    outputs = [ sess.graph.get_tensor_by_name(output+":0") for output in full_outputs if "Reshape" not in output ]
++    #sort outputs
++    outputs.sort(key=lambda el: natural_sort_key(el.name))
++    # format it as expected
++    outputs = [ dict(enumerate(outputs)) ]
++
++    sess.run(tf.global_variables_initializer())
++  return inputs, detections, sess, outputs
++
++def load_graph(tiny):
++    # We load the protobuf file from the disk and parse it to retrieve the
++    # unserialized graph_def
++    frozen_graph_filename = 'tiny-frozen.pb' if tiny else 'frozen.pb'
++    with open(frozen_graph_filename,"rb") as f:
++        graph_def = tf.GraphDef()
++        graph_def.ParseFromString(f.read())
++    mapped_node_0 = 'yolov3_tiny/Reshape' if tiny else 'yolov3/Reshape'
++    mapped_node_1 = 'yolov3_tiny/Reshape_4' if tiny else 'yolov3/Reshape_4'
++    mapped_node_2 = 'yolov3/Reshape_8'
++    # Then, we import the graph_def into a new Graph and returns it
++    if tiny:
++      with tf.Graph().as_default() as graph:
++          # Define placeholder to hold the intermediate values out of Zebra
++          zebra_output_0 = tf.placeholder(tf.float32, shape=[None, 507, 85], name='zebra_output_0')
++          zebra_output_1 = tf.placeholder(tf.float32, shape=[None, 2028, 85], name='zebra_output_1')
++          tf.import_graph_def(graph_def, name='', input_map={
++            mapped_node_0 : zebra_output_0,
++            mapped_node_1 : zebra_output_1
++            })
++
++    else:
++        with tf.Graph().as_default() as graph:
++          zebra_output_0 = tf.placeholder(tf.float32, shape=[None, 507, 85], name='zebra_output_0')
++          zebra_output_1 = tf.placeholder(tf.float32, shape=[None, 2028, 85], name='zebra_output_1')
++          zebra_output_2 = tf.placeholder(tf.float32, shape=[None, 8112, 85], name='zebra_output_2')
++          tf.import_graph_def(graph_def, name='', input_map={
++            mapped_node_0 : zebra_output_0,
++            mapped_node_1 : zebra_output_1,
++            mapped_node_2 : zebra_output_2
++            })
++    return graph
++
++def _get_output_layers(graph_def):
++    """Retrieve the input and output layers from a tensorflow GraphDef.
++    Returns a tuple of the list of input nodes and the list of output layers' name.
++    """
++    inputs = [] # list entry nodes (placeholders)
++    nodes = set() # list all nodes
++    full_inputs = set() # list nodes that are inputs of others
++    for n in graph_def.node:
++        if n.op == "Assign":
++            # add inputs but ignore it as possible output
++            for inp in n.input:
++                nodes.add(inp)
++                full_inputs.add(inp)
++        elif n.op == "VariableV2":
++            nodes.add(n.name)
++            full_inputs.add(n.name)
++        elif n.op != "Const" and n.op != "NoOp":
++            nodes.add(n.name)
++            for inp in n.input:
++                nodes.add(inp)
++                full_inputs.add(inp)
++            if len(n.input) == 0:
++                inputs.append(n)
++    outputs = nodes - full_inputs
++    return list(outputs)
++
++def natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
++    return [int(text) if text.isdigit() else text.lower()
++            for text in _nsre.split(s)]
+ 
+ if __name__ == "__main__":
+   parser = argparse.ArgumentParser()
+@@ -59,6 +191,11 @@ if __name__ == "__main__":
+   parser.add_argument("iou", metavar="iou", type=float, help="IoU threshold [0.0, 1.0]")
+   parser.add_argument("confidence", metavar="confidence", type=float, help="confidence threshold [0.0, 1.0]")
+   parser.add_argument("path", type=str, help="path to file")
++  parser.add_argument("--freeze", action="store_true", help="enable freeze of graph")
++  parser.add_argument("--usefrozen", action="store_true", help="restore from frozen")
++  parser.add_argument("--out_file", type=str, help="output path for video", default=None, required=False)
++  parser.add_argument("--loop", help="loop input video", action="store_true", default=False, required=False)
++
+ 
+   args = parser.parse_args()
+-  main(args.mode, args.tiny, args.iou, args.confidence, args.path)
++  main(args.mode, args.tiny, args.iou, args.confidence, args.path, args.freeze, args.usefrozen, args.out_file, args.loop)
+diff --git a/mipso_custom.py b/mipso_custom.py
+new file mode 100644
+index 0000000..69a97ef
+--- /dev/null
++++ b/mipso_custom.py
+@@ -0,0 +1,232 @@
++
++import cv2
++import os
++
++############################################################
++############################################################
++
++# the application will open several window and place them on the desktop at
++# specific location. The below variables allow to configure the location
++
++# this is the X/Y offset for window position
++WINDOW_X_OFFSET         = int(os.environ.get("WINDOW_X_OFFSET")         or 0)
++WINDOW_Y_OFFSET         = int(os.environ.get("WINDOW_Y_OFFSET")         or 0)
++
++# this is the number of window per row
++WINDOW_PER_ROW          = int(os.environ.get("WINDOW_PER_ROW")          or 3)
++
++# this is a scaling factor to reduce the window dimension (2: window will be 2x smaller)
++WINDOW_RATIO            = float(os.environ.get("WINDOW_RATIO")          or 1)
++
++# this force the width and height of the video
++WINDOW_WIDTH            = int(os.environ.get("WINDOW_WIDTH")            or 0)
++WINDOW_HEIGHT           = int(os.environ.get("WINDOW_HEIGHT")           or 0)
++
++# this is the index position to place a window so a slide can be displayed. For instance, in a 3x3 configuration use 4 to let the center empty
++WINDOW_SLIDE_IDX        = int(os.environ.get("WINDOW_SLIDE_IDX")        or 4)
++
++# this is the number of batch (usually the number of cores) per system
++BATCH_PER_SYSTEM        = int(os.environ.get("BATCH_PER_SYSTEM")        or 1)
++
++# this is the number of system per board
++SYSTEM_PER_BOARD        = int(os.environ.get("SYSTEM_PER_BOARD")        or 2)
++
++# show info/FPS by default
++SHOW_INFO               = int(os.environ.get("SHOW_INFO")               or 0)
++SHOW_FPS                = int(os.environ.get("SHOW_FPS")                or 0)
++
++
++# enable the MJPG mode
++OPENCV_CAMERA_MJPG      = int(os.environ.get("OPENCV_CAMERA_MJPG")      or 1)
++# force camera width/height
++OPENCV_CAMERA_WIDTH     = int(os.environ.get("OPENCV_CAMERA_WIDTH")     or 0)
++OPENCV_CAMERA_HEIGHT    = int(os.environ.get("OPENCV_CAMERA_HEIGHT")    or 0)
++
++
++############################################################
++############################################################
++
++# only for YoloV2:
++def mipso_get_interpolation():
++    return cv2.INTER_NEAREST
++    return cv2.INTER_LINEAR
++    #return cv2.INTER_LANCZOS4
++
++# only for YoloV2
++def mipso_camera_reduce_delay():
++    return False # normal execution: capture / inference / display from capture
++    return True # reduce delay execution: inference on prev capture / capture / display from capture using previous inference
++
++# only for YoloV2
++def mipso_box_rounding(i):
++    return i
++    round = 20
++    return ((i + round) // (2*round) ) * 2*round
++
++def mipso_camera_init(c):
++    print ("Initial camera resolution {}x{} @ {}".format(
++        c.get(cv2.CAP_PROP_FRAME_WIDTH),
++        c.get(cv2.CAP_PROP_FRAME_HEIGHT),
++        c.get(cv2.CAP_PROP_FPS)))
++    if OPENCV_CAMERA_WIDTH != 0:
++        c.set(cv2.CAP_PROP_FRAME_WIDTH , OPENCV_CAMERA_WIDTH)
++    if OPENCV_CAMERA_HEIGHT != 0:
++        c.set(cv2.CAP_PROP_FRAME_HEIGHT , OPENCV_CAMERA_HEIGHT)
++    if OPENCV_CAMERA_MJPG != 0:
++        c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
++    print ("Using camera resolution {}x{} @ {}".format(
++        c.get(cv2.CAP_PROP_FRAME_WIDTH),
++        c.get(cv2.CAP_PROP_FRAME_HEIGHT),
++        c.get(cv2.CAP_PROP_FPS)))
++
++def mipso_window_init(idx, width, height):
++    cv2.namedWindow(str(idx), cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_FREERATIO)
++    #cv2.namedWindow(str(idx), cv2.WINDOW_NORMAL)
++
++    if WINDOW_WIDTH != 0 and WINDOW_HEIGHT != 0:
++        cur_width = WINDOW_WIDTH
++        cur_height = WINDOW_HEIGHT
++    else:
++        cur_width = int(width // WINDOW_RATIO)
++        cur_height = int(height // WINDOW_RATIO)
++
++    cv2.resizeWindow(str(idx), (cur_width, cur_height))
++    board=0
++    system=0
++    core=0
++    if 'ZEBRA_RUNSESSION_ENABLECORES' in os.environ:
++        c = os.environ['ZEBRA_RUNSESSION_ENABLECORES'].split(':')[0].split('_')
++        if len(c[0]) > 0:
++            board = int(c[0][1:])
++        if len(c) > 1:
++            system = int(c[1][1:])
++        if len(c) > 2:
++            core = int(c[2][1:])
++
++    cur_idx = idx + core + BATCH_PER_SYSTEM * ( system + SYSTEM_PER_BOARD * board)
++    # in case we want to put slide somewhere
++    if cur_idx >= WINDOW_SLIDE_IDX:
++        cur_idx = cur_idx + 1
++    pos_x = WINDOW_X_OFFSET + int( (cur_idx % WINDOW_PER_ROW)*cur_width)
++    pos_y = WINDOW_Y_OFFSET + int( 0 + (cur_idx // WINDOW_PER_ROW)*cur_height)
++
++    print("Move window {} {}x{} for system {} @ ({} , {})".format(idx, cur_width, cur_height, system, pos_x, pos_y))
++    cv2.moveWindow(str(idx), pos_x, pos_y)
++
++def mipso_parse_input(file):
++    mode='file'
++    for part in file.split(':'):
++        if 'camera' == part:
++            mode='camera'
++            continue
++        if part.isdigit():
++            yield mode, int(part)
++        else:
++            mode='file'
++            yield mode, part
++
++
++
++def mipso_opencv_capture(file):
++    """
++    return a list of opencv capture device
++    """
++    camera = []
++    # TODO: use a better handling of the different mode (class)
++    if 'camera' == file:
++        # open all camera
++        camera_idx=0
++        while True:
++            c = cv2.VideoCapture(camera_idx)
++            if c.isOpened() == False:
++                break
++            camera.append(c)
++            mipso_camera_init(c)
++            camera_idx = camera_idx + 1
++    else:
++        for mode, url in mipso_parse_input(file):
++            c = cv2.VideoCapture(url)
++            if c.isOpened() == False:
++                print("Error opening source {} {}".format(mode, url))
++                break
++            if mode == 'camera':
++                mipso_camera_init(c)
++            camera.append(c)
++
++    assert len(camera) > 0, 'Cannot capture source'
++    return camera
++
++# TODO: create a Mipso class
++showHelp = False
++pauseMode = False
++showWindowInfo = SHOW_INFO != 0
++showFps = SHOW_FPS != 0
++
++def mipso_process_key(key):
++    global showHelp
++    global pauseMode
++    global showWindowInfo
++    global showFps
++
++    if pauseMode:
++        print ("pause mode, press 'p' to play or any other key to move to the next frame")
++    while True:
++        if key == 27:
++            return key
++        if key > 0 and chr(key) in 'h':
++            showHelp = not showHelp
++        if key > 0 and chr(key) in 'p':
++            pauseMode = not pauseMode
++        if key > 0 and chr(key) in 'i':
++            showWindowInfo = not showWindowInfo
++        if key > 0 and chr(key) in 'f':
++            showFps = not showFps
++        if not pauseMode or key != -1:
++            break
++        key = cv2.waitKey(1)
++    return key
++
++def print_help(frame):
++
++    HELP="\
++Key usage:\n\
++    ESC : exit the demo\n\
++    h   : toggle displaying this help\n\
++    p   : pause the video (any other key will do frame by frame)\n\
++    i   : toggle showing network information\n\
++    f   : toggle showing FPS\n\
++"
++    scale = 1
++    if frame.shape[1] < 1240:
++        scale = scale * frame.shape[1] / 1240
++    for y, line in enumerate(HELP.split('\n')):
++        cv2.putText(frame, line, (20, int(scale*(200 + y * 40))), cv2.FONT_HERSHEY_SIMPLEX,
++                    scale, (255,255,0), 1)
++
++
++def print_text(frame, x, y, text, scale=1.2):
++    font                   = cv2.FONT_HERSHEY_SIMPLEX
++    bottomLeftCornerOfText = (10,500)
++    fontScale              = scale
++    fontColor              = (0,0,255)
++    lineType               = 2 if scale >= 1 else 1
++
++    cv2.putText(frame, text, (x, y),
++        font,
++        fontScale,
++        fontColor,
++        lineType)
++
++def mipso_window_info(f, idx, name, latency):
++    if showHelp:
++        print_help(f)
++    if showWindowInfo:
++        scale = 1
++        if f.shape[1] < 500:
++            scale = scale * f.shape[1] / 500
++        if showFps:
++            print_text( f, 10, int(scale*30), "Zebra: {} FPS={}".format(name, str(int(1/latency))), scale )
++        else:
++            print_text( f, 10, int(scale*30), "Zebra: {}".format(name), scale)
++        #print_text(f, 10, 50, "Latency is: " + str(int(1000*latency)) + " ms. FPS is: " + str(int(1/latency)) + " img/s")
++
+diff --git a/requirements.txt b/requirements.txt
+index 9478676..8736bb2 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,4 +1,5 @@
+-tensorflow>=1.13.1
+-numpy>=1.16.2
++tensorflow==1.14.0
++numpy<1.17
+ Pillow>=5.4.1
+ opencv-python>=4.0.0.21
++gast==0.2.2
+diff --git a/run b/run
+new file mode 100755
+index 0000000..aa5e599
+--- /dev/null
++++ b/run
+@@ -0,0 +1,4 @@
++#! /bin/bash
++
++python3 detect.py video 0.5 0.5 --usefrozen "$@"
++

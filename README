@@ -1,0 +1,47 @@
+# this readme contains the various useful command lines that will be
+# included in the bash history of the docker
+#
+
+######################################################################
+# source zebra environment
+######################################################################
+. zebra/settings.sh tensorflow
+
+######################################################################
+# YOLO V2 using darkflow
+######################################################################
+
+cd ~/darkflow
+
+python3 ./flow --pbLoad built_graph/yolov2.pb --metaLoad built_graph/yolov2.meta --threshold 0.5 --demo camera --queue 1 # YOLO_V2_608
+python3 ./flow --pbLoad built_graph/yolov2-voc.pb --metaLoad built_graph/yolov2-voc.meta --threshold 0.5 --demo camera --queue 1 # YOLO_V2_VOC_416
+
+
+######################################################################
+# YOLO V3 using tensorflow-yolo3
+######################################################################
+
+cd ~/tensorflow-yolo3
+python3 ./detect.py --image_file camera --batch 1 # YOLO_V3
+
+######################################################################
+# YOLO V2 using pytorch-yolo2
+######################################################################
+
+cd ~/pytorch-yolo2
+python3 demo.py cfg/yolo.cfg yolo.weights camera 1 # YOLO_V2_PYTORCH
+
+######################################################################
+# YOLO V2 using yolo2-pytorch
+######################################################################
+
+cd ~/yolo2-pytorch
+python3 demo.py # YOLO_V2_PYTORCH
+
+######################################################################
+# VDSR using VDSR-Tensorflow
+######################################################################
+
+cd ~/VDSR-Tensorflow/VDSR
+python3 demo.py --image_in 'data/291/*.png' --out_x 64 --out_y 128 # VDSR
+

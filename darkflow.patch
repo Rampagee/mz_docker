@@ -1,0 +1,645 @@
+diff --git a/darkflow/cli.py b/darkflow/cli.py
+index 0b0f5bf..4ac29c5 100644
+--- a/darkflow/cli.py
++++ b/darkflow/cli.py
+@@ -27,7 +27,8 @@ def cliHandler(args):
+     
+     if FLAGS.demo:
+         tfnet.camera()
+-        exit('Demo stopped, exit.')
++        print('Demo stopped, exit.')
++        exit(0)
+ 
+     if FLAGS.train:
+         print('Enter training ...'); tfnet.train()
+diff --git a/darkflow/defaults.py b/darkflow/defaults.py
+index a54b2ec..419c26c 100644
+--- a/darkflow/defaults.py
++++ b/darkflow/defaults.py
+@@ -26,10 +26,12 @@ class argHandler(dict):
+         self.define('gpuName', '/gpu:0', 'GPU device name')
+         self.define('lr', 1e-5, 'learning rate')
+         self.define('keep',20,'Number of most recent training results to save')
+-        self.define('batch', 16, 'batch size')
++        self.define('batch', 1, 'batch size')
+         self.define('epoch', 1000, 'number of epoch')
+         self.define('save', 2000, 'save checkpoint every ? training examples')
+         self.define('demo', '', 'demo on webcam')
++        self.define('inputSize', '416x416', 'input dimension')
++        self.define('loop', False, 'loop input video')
+         self.define('queue', 1, 'process demo in batch')
+         self.define('json', False, 'Outputs bounding box information in json format.')
+         self.define('saveVideo', False, 'Records video from input video or camera')
+diff --git a/darkflow/mipso_custom.py b/darkflow/mipso_custom.py
+new file mode 100644
+index 0000000..69a97ef
+--- /dev/null
++++ b/darkflow/mipso_custom.py
+@@ -0,0 +1,232 @@
++
++import cv2
++import os
++
++############################################################
++############################################################
++
++# the application will open several window and place them on the desktop at
++# specific location. The below variables allow to configure the location
++
++# this is the X/Y offset for window position
++WINDOW_X_OFFSET         = int(os.environ.get("WINDOW_X_OFFSET")         or 0)
++WINDOW_Y_OFFSET         = int(os.environ.get("WINDOW_Y_OFFSET")         or 0)
++
++# this is the number of window per row
++WINDOW_PER_ROW          = int(os.environ.get("WINDOW_PER_ROW")          or 3)
++
++# this is a scaling factor to reduce the window dimension (2: window will be 2x smaller)
++WINDOW_RATIO            = float(os.environ.get("WINDOW_RATIO")          or 1)
++
++# this force the width and height of the video
++WINDOW_WIDTH            = int(os.environ.get("WINDOW_WIDTH")            or 0)
++WINDOW_HEIGHT           = int(os.environ.get("WINDOW_HEIGHT")           or 0)
++
++# this is the index position to place a window so a slide can be displayed. For instance, in a 3x3 configuration use 4 to let the center empty
++WINDOW_SLIDE_IDX        = int(os.environ.get("WINDOW_SLIDE_IDX")        or 4)
++
++# this is the number of batch (usually the number of cores) per system
++BATCH_PER_SYSTEM        = int(os.environ.get("BATCH_PER_SYSTEM")        or 1)
++
++# this is the number of system per board
++SYSTEM_PER_BOARD        = int(os.environ.get("SYSTEM_PER_BOARD")        or 2)
++
++# show info/FPS by default
++SHOW_INFO               = int(os.environ.get("SHOW_INFO")               or 0)
++SHOW_FPS                = int(os.environ.get("SHOW_FPS")                or 0)
++
++
++# enable the MJPG mode
++OPENCV_CAMERA_MJPG      = int(os.environ.get("OPENCV_CAMERA_MJPG")      or 1)
++# force camera width/height
++OPENCV_CAMERA_WIDTH     = int(os.environ.get("OPENCV_CAMERA_WIDTH")     or 0)
++OPENCV_CAMERA_HEIGHT    = int(os.environ.get("OPENCV_CAMERA_HEIGHT")    or 0)
++
++
++############################################################
++############################################################
++
++# only for YoloV2:
++def mipso_get_interpolation():
++    return cv2.INTER_NEAREST
++    return cv2.INTER_LINEAR
++    #return cv2.INTER_LANCZOS4
++
++# only for YoloV2
++def mipso_camera_reduce_delay():
++    return False # normal execution: capture / inference / display from capture
++    return True # reduce delay execution: inference on prev capture / capture / display from capture using previous inference
++
++# only for YoloV2
++def mipso_box_rounding(i):
++    return i
++    round = 20
++    return ((i + round) // (2*round) ) * 2*round
++
++def mipso_camera_init(c):
++    print ("Initial camera resolution {}x{} @ {}".format(
++        c.get(cv2.CAP_PROP_FRAME_WIDTH),
++        c.get(cv2.CAP_PROP_FRAME_HEIGHT),
++        c.get(cv2.CAP_PROP_FPS)))
++    if OPENCV_CAMERA_WIDTH != 0:
++        c.set(cv2.CAP_PROP_FRAME_WIDTH , OPENCV_CAMERA_WIDTH)
++    if OPENCV_CAMERA_HEIGHT != 0:
++        c.set(cv2.CAP_PROP_FRAME_HEIGHT , OPENCV_CAMERA_HEIGHT)
++    if OPENCV_CAMERA_MJPG != 0:
++        c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
++    print ("Using camera resolution {}x{} @ {}".format(
++        c.get(cv2.CAP_PROP_FRAME_WIDTH),
++        c.get(cv2.CAP_PROP_FRAME_HEIGHT),
++        c.get(cv2.CAP_PROP_FPS)))
++
++def mipso_window_init(idx, width, height):
++    cv2.namedWindow(str(idx), cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_FREERATIO)
++    #cv2.namedWindow(str(idx), cv2.WINDOW_NORMAL)
++
++    if WINDOW_WIDTH != 0 and WINDOW_HEIGHT != 0:
++        cur_width = WINDOW_WIDTH
++        cur_height = WINDOW_HEIGHT
++    else:
++        cur_width = int(width // WINDOW_RATIO)
++        cur_height = int(height // WINDOW_RATIO)
++
++    cv2.resizeWindow(str(idx), (cur_width, cur_height))
++    board=0
++    system=0
++    core=0
++    if 'ZEBRA_RUNSESSION_ENABLECORES' in os.environ:
++        c = os.environ['ZEBRA_RUNSESSION_ENABLECORES'].split(':')[0].split('_')
++        if len(c[0]) > 0:
++            board = int(c[0][1:])
++        if len(c) > 1:
++            system = int(c[1][1:])
++        if len(c) > 2:
++            core = int(c[2][1:])
++
++    cur_idx = idx + core + BATCH_PER_SYSTEM * ( system + SYSTEM_PER_BOARD * board)
++    # in case we want to put slide somewhere
++    if cur_idx >= WINDOW_SLIDE_IDX:
++        cur_idx = cur_idx + 1
++    pos_x = WINDOW_X_OFFSET + int( (cur_idx % WINDOW_PER_ROW)*cur_width)
++    pos_y = WINDOW_Y_OFFSET + int( 0 + (cur_idx // WINDOW_PER_ROW)*cur_height)
++
++    print("Move window {} {}x{} for system {} @ ({} , {})".format(idx, cur_width, cur_height, system, pos_x, pos_y))
++    cv2.moveWindow(str(idx), pos_x, pos_y)
++
++def mipso_parse_input(file):
++    mode='file'
++    for part in file.split(':'):
++        if 'camera' == part:
++            mode='camera'
++            continue
++        if part.isdigit():
++            yield mode, int(part)
++        else:
++            mode='file'
++            yield mode, part
++
++
++
++def mipso_opencv_capture(file):
++    """
++    return a list of opencv capture device
++    """
++    camera = []
++    # TODO: use a better handling of the different mode (class)
++    if 'camera' == file:
++        # open all camera
++        camera_idx=0
++        while True:
++            c = cv2.VideoCapture(camera_idx)
++            if c.isOpened() == False:
++                break
++            camera.append(c)
++            mipso_camera_init(c)
++            camera_idx = camera_idx + 1
++    else:
++        for mode, url in mipso_parse_input(file):
++            c = cv2.VideoCapture(url)
++            if c.isOpened() == False:
++                print("Error opening source {} {}".format(mode, url))
++                break
++            if mode == 'camera':
++                mipso_camera_init(c)
++            camera.append(c)
++
++    assert len(camera) > 0, 'Cannot capture source'
++    return camera
++
++# TODO: create a Mipso class
++showHelp = False
++pauseMode = False
++showWindowInfo = SHOW_INFO != 0
++showFps = SHOW_FPS != 0
++
++def mipso_process_key(key):
++    global showHelp
++    global pauseMode
++    global showWindowInfo
++    global showFps
++
++    if pauseMode:
++        print ("pause mode, press 'p' to play or any other key to move to the next frame")
++    while True:
++        if key == 27:
++            return key
++        if key > 0 and chr(key) in 'h':
++            showHelp = not showHelp
++        if key > 0 and chr(key) in 'p':
++            pauseMode = not pauseMode
++        if key > 0 and chr(key) in 'i':
++            showWindowInfo = not showWindowInfo
++        if key > 0 and chr(key) in 'f':
++            showFps = not showFps
++        if not pauseMode or key != -1:
++            break
++        key = cv2.waitKey(1)
++    return key
++
++def print_help(frame):
++
++    HELP="\
++Key usage:\n\
++    ESC : exit the demo\n\
++    h   : toggle displaying this help\n\
++    p   : pause the video (any other key will do frame by frame)\n\
++    i   : toggle showing network information\n\
++    f   : toggle showing FPS\n\
++"
++    scale = 1
++    if frame.shape[1] < 1240:
++        scale = scale * frame.shape[1] / 1240
++    for y, line in enumerate(HELP.split('\n')):
++        cv2.putText(frame, line, (20, int(scale*(200 + y * 40))), cv2.FONT_HERSHEY_SIMPLEX,
++                    scale, (255,255,0), 1)
++
++
++def print_text(frame, x, y, text, scale=1.2):
++    font                   = cv2.FONT_HERSHEY_SIMPLEX
++    bottomLeftCornerOfText = (10,500)
++    fontScale              = scale
++    fontColor              = (0,0,255)
++    lineType               = 2 if scale >= 1 else 1
++
++    cv2.putText(frame, text, (x, y),
++        font,
++        fontScale,
++        fontColor,
++        lineType)
++
++def mipso_window_info(f, idx, name, latency):
++    if showHelp:
++        print_help(f)
++    if showWindowInfo:
++        scale = 1
++        if f.shape[1] < 500:
++            scale = scale * f.shape[1] / 500
++        if showFps:
++            print_text( f, 10, int(scale*30), "Zebra: {} FPS={}".format(name, str(int(1/latency))), scale )
++        else:
++            print_text( f, 10, int(scale*30), "Zebra: {}".format(name), scale)
++        #print_text(f, 10, 50, "Latency is: " + str(int(1000*latency)) + " ms. FPS is: " + str(int(1/latency)) + " img/s")
++
+diff --git a/darkflow/net/build.py b/darkflow/net/build.py
+index 1359f9f..bcba148 100644
+--- a/darkflow/net/build.py
++++ b/darkflow/net/build.py
+@@ -88,6 +88,11 @@ class TFNet(object):
+ 		)
+ 		with open(self.FLAGS.metaLoad, 'r') as fp:
+ 			self.meta = json.load(fp)
++			self.meta['inp_size'][0:2] = [int(i) for i in self.FLAGS.inputSize.split('x')[::-1]]
++			self.meta['out_size'][0:2] = [i//32 for i in self.meta['inp_size'][0:2] ]
++			self.say("\nUsing input {} dimension (output is {})".format(self.meta['inp_size'][0:2], self.meta['out_size'][0:2]))
++			for i in self.meta['inp_size'][0:2]:
++				assert i % 32 == 0, "Error: input dimension {} is not a multiple of 32".format(i)
+ 		self.framework = create_framework(self.meta, self.FLAGS)
+ 
+ 		# Placeholders
+@@ -101,7 +106,7 @@ class TFNet(object):
+ 		verbalise = self.FLAGS.verbalise
+ 
+ 		# Placeholders
+-		inp_size = [None] + self.meta['inp_size']
++		inp_size = [None, None, None, 3]
+ 		self.inp = tf.placeholder(tf.float32, inp_size, 'input')
+ 		self.feed = dict() # other placeholders
+ 
+@@ -168,10 +173,11 @@ class TFNet(object):
+ 		tfnet_pb.sess = tf.Session(graph = tfnet_pb.graph)
+ 		# tfnet_pb.predict() # uncomment for unit testing
+ 		name = 'built_graph/{}.pb'.format(self.meta['name'])
+-		os.makedirs(os.path.dirname(name), exist_ok=True)
++		if not os.path.isdir(os.path.dirname(name)):
++			os.makedirs(os.path.dirname(name))
+ 		#Save dump of everything in meta
+ 		with open('built_graph/{}.meta'.format(self.meta['name']), 'w') as fp:
+ 			json.dump(self.meta, fp)
+ 		self.say('Saving const graph def to {}'.format(name))
+ 		graph_def = tfnet_pb.sess.graph_def
+-		tf.train.write_graph(graph_def,'./', name, False)
+\ No newline at end of file
++		tf.train.write_graph(graph_def,'./', name, False)
+diff --git a/darkflow/net/help.py b/darkflow/net/help.py
+index 616e85b..fded26b 100644
+--- a/darkflow/net/help.py
++++ b/darkflow/net/help.py
+@@ -8,6 +8,7 @@ import numpy as np
+ import sys
+ import cv2
+ import os
++from ..mipso_custom import *
+ 
+ old_graph_msg = 'Resolving old graph def {} (no guarantee)'
+ 
+@@ -65,91 +66,140 @@ def _get_fps(self, frame):
+     processed = self.framework.postprocess(net_out, frame, False)
+     return timer() - start
+ 
++
++def capture_all_camera(c, loop=False):
++    _, frame = c.read()
++    if loop and frame is None:
++        c.set(cv2.CAP_PROP_POS_FRAMES, 0)
++        _, frame = c.read()
++    return frame
++
++global_self = None
++def preprocess_wrapper(f):
++    if f is not None:
++        return global_self.framework.preprocess(f)
++
++
+ def camera(self):
+     file = self.FLAGS.demo
+     SaveVideo = self.FLAGS.saveVideo
+     
+-    if file == 'camera':
+-        file = 0
+-    else:
+-        assert os.path.isfile(file), \
+-        'file {} does not exist'.format(file)
+-        
+-    camera = cv2.VideoCapture(file)
+-    
+-    if file == 0:
+-        self.say('Press [ESC] to quit demo')
+         
+-    assert camera.isOpened(), \
+-    'Cannot capture source'
+-    
+-    if file == 0:#camera window
+-        cv2.namedWindow('', 0)
+-        _, frame = camera.read()
+-        height, width, _ = frame.shape
+-        cv2.resizeWindow('', width, height)
+-    else:
+-        _, frame = camera.read()
+-        height, width, _ = frame.shape
+-
+-    if SaveVideo:
+-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+-        if file == 0:#camera window
+-          fps = 1 / self._get_fps(frame)
+-          if fps < 1:
+-            fps = 1
+-        else:
+-            fps = round(camera.get(cv2.CAP_PROP_FPS))
+-        videoWriter = cv2.VideoWriter(
+-            'video.avi', fourcc, fps, (width, height))
++    camera = mipso_opencv_capture(file)
+ 
++    if not SaveVideo:
++        self.say('Press [ESC] to quit demo')
+     # buffers for demo in batch
+     buffer_inp = list()
+     buffer_pre = list()
+-    
++
++    videoArray = []
++
++    global global_self
++    global_self = self
++
++    #import multiprocessing as mp
++    #pool = mp.Pool(len(camera))
++
+     elapsed = int()
+     start = timer()
+-    self.say('Press [ESC] to quit demo')
++    firstShow = True
++
++    REDUCE_DELAY = mipso_camera_reduce_delay() and self.FLAGS.batch == 1
++    if REDUCE_DELAY:
++        buffer_inp = [capture_all_camera(c, self.FLAGS.loop) for c in camera]
++
+     # Loop through frames
+-    while camera.isOpened():
++    while len(camera) > 0:
+         elapsed += 1
+-        _, frame = camera.read()
+-        if frame is None:
+-            print ('\nEnd of Video')
+-            break
+-        preprocessed = self.framework.preprocess(frame)
+-        buffer_inp.append(frame)
+-        buffer_pre.append(preprocessed)
+-        
++
++        start_capture = timer()
++        if not REDUCE_DELAY:
++            buffer_cap = [capture_all_camera(c, self.FLAGS.loop) for c in camera]
++            buffer_inp.extend(buffer_cap)
++        else:
++            buffer_cap = buffer_inp
++        ##buffer_pre.extend(pool.map(preprocess_wrapper, buffer_cap, chunksize=1))
++        buffer_pre.extend(list(map(preprocess_wrapper, buffer_cap)))
++
++        if elapsed == 1 and SaveVideo:
++            assert (len(camera) == 1), 'Cannot save multiple video'
++            height, width, _ = buffer_inp[0].shape
++            fourcc = cv2.VideoWriter_fourcc(*'XVID')
++            fps = max(1, round(camera[0].get(cv2.CAP_PROP_FPS)))
++            videoWriter = cv2.VideoWriter(
++                'video.avi', fourcc, fps, (width, height))
++
++
++        for c, frame, frame_pre in zip(camera, buffer_inp, buffer_pre):
++            if frame is None:
++                print ('\nEnd of Video')
++                c.release()
++                camera.remove(c)
++                buffer_inp.remove(frame)
++                buffer_pre.remove(frame_pre)
++
++        end_capture = timer()
+         # Only process and imshow when queue is full
+-        if elapsed % self.FLAGS.queue == 0:
++        if len(buffer_inp) > 0 and (elapsed % self.FLAGS.batch == 0):
+             feed_dict = {self.inp: buffer_pre}
++            start_inf = timer()
+             net_out = self.sess.run(self.out, feed_dict)
++            took_inf = timer() - start_inf
++            idx = 0
++            post_time = 0
++            if REDUCE_DELAY:
++                buffer_inp_capture = list()
+             for img, single_out in zip(buffer_inp, net_out):
++                begin_post = timer()
++                if REDUCE_DELAY:
++                    img = capture_all_camera(camera[idx])
++                    buffer_inp_capture.append(img)
+                 postprocessed = self.framework.postprocess(
+                     single_out, img, False)
++                post_time = post_time + timer() - begin_post
++                mipso_window_info(postprocessed, idx, "TF YOLOV2", took_inf)
+                 if SaveVideo:
+-                    videoWriter.write(postprocessed)
+-                if file == 0: #camera window
+-                    cv2.imshow('', postprocessed)
++                    videoArray.append(postprocessed)
++                else:
++                    if firstShow:
++                        height, width, _ = img.shape
++                        mipso_window_init(idx, width, height)
++                    cv2.imshow(str(idx), postprocessed)
++                idx = idx + 1
++            firstShow = False
+             # Clear Buffers
+-            buffer_inp = list()
++            if REDUCE_DELAY:
++                buffer_inp = buffer_inp_capture
++            else:
++                buffer_inp = list()
+             buffer_pre = list()
++            end_display = timer()
++            sys.stdout.write("ALL {} ms. Capture {} ms. inference {} ms. Display {} PostProcess {}\n".format(
++                        int(1000*(end_display-start_capture)),
++                        int(1000*(end_capture-start_capture)),
++                        int(1000*(took_inf                 )),
++                        int(1000*(end_display - took_inf - start_inf)),
++                        int(1000*post_time)))
+ 
+         if elapsed % 5 == 0:
+-            sys.stdout.write('\r')
+-            sys.stdout.write('{0:3.3f} FPS'.format(
+-                elapsed / (timer() - start)))
++            #sys.stdout.write('\r')
++            #sys.stdout.write('{0:3.3f} FPS'.format(
++            #    5 / (timer() - start)))
+             sys.stdout.flush()
+-        if file == 0: #camera window
++            start = timer()
++        if not SaveVideo:
+             choice = cv2.waitKey(1)
++            choice = mipso_process_key(choice)
+             if choice == 27: break
+ 
++    #pool.close()
+     sys.stdout.write('\n')
+     if SaveVideo:
++        for v in videoArray:
++            videoWriter.write(v)
+         videoWriter.release()
+-    camera.release()
+-    if file == 0: #camera window
++    if not SaveVideo:
+         cv2.destroyAllWindows()
+ 
+ def to_darknet(self):
+diff --git a/darkflow/net/yolo/__init__.py b/darkflow/net/yolo/__init__.py
+index 1ad7d54..b650073 100644
+--- a/darkflow/net/yolo/__init__.py
++++ b/darkflow/net/yolo/__init__.py
+@@ -3,6 +3,7 @@ from . import predict
+ from . import data
+ from . import misc
+ import numpy as np
++import random
+ 
+ 
+ """ YOLO framework __init__ equivalent"""
+@@ -12,10 +13,10 @@ def constructor(self, meta, FLAGS):
+ 	def _to_color(indx, base):
+ 		""" return (b, r, g) tuple"""
+ 		base2 = base * base
+-		b = 2 - indx / base2
+-		r = 2 - (indx % base2) / base
+-		g = 2 - (indx % base2) % base
+-		return (b * 127, r * 127, g * 127)
++		b = indx / base2
++		r = (indx % base2) / base
++		g = (indx % base2) % base
++		return (255 - b * 255/base, 255 - r * 255/base, 255 - g * 255/base)
+ 	if 'labels' not in meta:
+ 		misc.labels(meta, FLAGS) #We're not loading from a .pb so we do need to load the labels
+ 	assert len(meta['labels']) == meta['classes'], (
+@@ -28,6 +29,8 @@ def constructor(self, meta, FLAGS):
+ 	base = int(np.ceil(pow(meta['classes'], 1./3)))
+ 	for x in range(len(meta['labels'])): 
+ 		colors += [_to_color(x, base)]
++	random.seed(2)
++	random.shuffle(colors)
+ 	meta['colors'] = colors
+ 	self.fetch = list()
+ 	self.meta, self.FLAGS = meta, FLAGS
+diff --git a/darkflow/net/yolo/predict.py b/darkflow/net/yolo/predict.py
+index de3f789..4105f88 100644
+--- a/darkflow/net/yolo/predict.py
++++ b/darkflow/net/yolo/predict.py
+@@ -6,6 +6,9 @@ import os
+ import json
+ from ...cython_utils.cy_yolo_findboxes import yolo_box_constructor
+ 
++from ...mipso_custom import mipso_get_interpolation
++from ...mipso_custom import mipso_box_rounding
++
+ def _fix(obj, dims, scale, offs):
+ 	for i in range(1, 5):
+ 		dim = dims[(i + 1) % 2]
+@@ -15,7 +18,7 @@ def _fix(obj, dims, scale, offs):
+ 
+ def resize_input(self, im):
+ 	h, w, c = self.meta['inp_size']
+-	imsz = cv2.resize(im, (w, h))
++	imsz = cv2.resize(im, (w, h), interpolation=mipso_get_interpolation())
+ 	imsz = imsz / 255.
+ 	imsz = imsz[:,:,::-1]
+ 	return imsz
+@@ -25,10 +28,10 @@ def process_box(self, b, h, w, threshold):
+ 	max_prob = b.probs[max_indx]
+ 	label = self.meta['labels'][max_indx]
+ 	if max_prob > threshold:
+-		left  = int ((b.x - b.w/2.) * w)
+-		right = int ((b.x + b.w/2.) * w)
+-		top   = int ((b.y - b.h/2.) * h)
+-		bot   = int ((b.y + b.h/2.) * h)
++		left  = mipso_box_rounding(int ((b.x - b.w/2.) * w))
++		right = mipso_box_rounding(int ((b.x + b.w/2.) * w))
++		top   = mipso_box_rounding(int ((b.y - b.h/2.) * h))
++		bot   = mipso_box_rounding(int ((b.y + b.h/2.) * h))
+ 		if left  < 0    :  left = 0
+ 		if right > w - 1: right = w - 1
+ 		if top   < 0    :   top = 0
+diff --git a/darkflow/net/yolov2/predict.py b/darkflow/net/yolov2/predict.py
+index b3485c4..ddbd1e5 100644
+--- a/darkflow/net/yolov2/predict.py
++++ b/darkflow/net/yolov2/predict.py
+@@ -46,7 +46,7 @@ def postprocess(self, net_out, im, save = True):
+ 		if boxResults is None:
+ 			continue
+ 		left, right, top, bot, mess, max_indx, confidence = boxResults
+-		thick = int((h + w) // 300)
++		thick = max(int((h + w) // 600), 2)
+ 		if self.FLAGS.json:
+ 			resultsForJSON.append({"label": mess, "confidence": float('%.2f' % confidence), "topleft": {"x": left, "y": top}, "bottomright": {"x": right, "y": bot}})
+ 			continue
+diff --git a/install b/install
+new file mode 100755
+index 0000000..b0e82eb
+--- /dev/null
++++ b/install
+@@ -0,0 +1,7 @@
++#! /bin/bash
++
++python3 -m pip install --user --upgrade pip
++python3 -m pip install --user tensorflow==1.8.0 opencv-python cython
++
++python3 setup.py build_ext --inplace
++
+diff --git a/run b/run
+new file mode 100755
+index 0000000..ad1f53a
+--- /dev/null
++++ b/run
+@@ -0,0 +1,22 @@
++#! /bin/bash
++
++in="$1"
++shift
++
++out_file=''
++args=""
++network="yolov2"
++while [ $# -gt 0 ]
++do
++  [ "$1" = "--out_file" ] && out_file=$2 && shift 2 && args="$args --saveVideo" && continue
++  [ "$1" = "--tiny" ] && network="yolov2-tiny" && shift && continue
++  args="$args $1"
++  shift
++done
++
++python3 ./flow --pbLoad built_graph/$network.pb --metaLoad built_graph/$network.meta --threshold 0.5 --demo "$in" $args || exit 1
++
++[ "$out_file" != "" ] && mv video.avi $out_file
++
++exit 0
++

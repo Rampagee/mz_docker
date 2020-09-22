@@ -1,0 +1,416 @@
+diff --git a/mipso_custom.py b/mipso_custom.py
+new file mode 100644
+index 0000000..69a97ef
+--- /dev/null
++++ b/mipso_custom.py
+@@ -0,0 +1,232 @@
++
++import cv2
++import os
++
++############################################################
++############################################################
++
++# the application will open several window and place them on the desktop at
++# specific location. The below variables allow to configure the location
++
++# this is the X/Y offset for window position
++WINDOW_X_OFFSET         = int(os.environ.get("WINDOW_X_OFFSET")         or 0)
++WINDOW_Y_OFFSET         = int(os.environ.get("WINDOW_Y_OFFSET")         or 0)
++
++# this is the number of window per row
++WINDOW_PER_ROW          = int(os.environ.get("WINDOW_PER_ROW")          or 3)
++
++# this is a scaling factor to reduce the window dimension (2: window will be 2x smaller)
++WINDOW_RATIO            = float(os.environ.get("WINDOW_RATIO")          or 1)
++
++# this force the width and height of the video
++WINDOW_WIDTH            = int(os.environ.get("WINDOW_WIDTH")            or 0)
++WINDOW_HEIGHT           = int(os.environ.get("WINDOW_HEIGHT")           or 0)
++
++# this is the index position to place a window so a slide can be displayed. For instance, in a 3x3 configuration use 4 to let the center empty
++WINDOW_SLIDE_IDX        = int(os.environ.get("WINDOW_SLIDE_IDX")        or 4)
++
++# this is the number of batch (usually the number of cores) per system
++BATCH_PER_SYSTEM        = int(os.environ.get("BATCH_PER_SYSTEM")        or 1)
++
++# this is the number of system per board
++SYSTEM_PER_BOARD        = int(os.environ.get("SYSTEM_PER_BOARD")        or 2)
++
++# show info/FPS by default
++SHOW_INFO               = int(os.environ.get("SHOW_INFO")               or 0)
++SHOW_FPS                = int(os.environ.get("SHOW_FPS")                or 0)
++
++
++# enable the MJPG mode
++OPENCV_CAMERA_MJPG      = int(os.environ.get("OPENCV_CAMERA_MJPG")      or 1)
++# force camera width/height
++OPENCV_CAMERA_WIDTH     = int(os.environ.get("OPENCV_CAMERA_WIDTH")     or 0)
++OPENCV_CAMERA_HEIGHT    = int(os.environ.get("OPENCV_CAMERA_HEIGHT")    or 0)
++
++
++############################################################
++############################################################
++
++# only for YoloV2:
++def mipso_get_interpolation():
++    return cv2.INTER_NEAREST
++    return cv2.INTER_LINEAR
++    #return cv2.INTER_LANCZOS4
++
++# only for YoloV2
++def mipso_camera_reduce_delay():
++    return False # normal execution: capture / inference / display from capture
++    return True # reduce delay execution: inference on prev capture / capture / display from capture using previous inference
++
++# only for YoloV2
++def mipso_box_rounding(i):
++    return i
++    round = 20
++    return ((i + round) // (2*round) ) * 2*round
++
++def mipso_camera_init(c):
++    print ("Initial camera resolution {}x{} @ {}".format(
++        c.get(cv2.CAP_PROP_FRAME_WIDTH),
++        c.get(cv2.CAP_PROP_FRAME_HEIGHT),
++        c.get(cv2.CAP_PROP_FPS)))
++    if OPENCV_CAMERA_WIDTH != 0:
++        c.set(cv2.CAP_PROP_FRAME_WIDTH , OPENCV_CAMERA_WIDTH)
++    if OPENCV_CAMERA_HEIGHT != 0:
++        c.set(cv2.CAP_PROP_FRAME_HEIGHT , OPENCV_CAMERA_HEIGHT)
++    if OPENCV_CAMERA_MJPG != 0:
++        c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
++    print ("Using camera resolution {}x{} @ {}".format(
++        c.get(cv2.CAP_PROP_FRAME_WIDTH),
++        c.get(cv2.CAP_PROP_FRAME_HEIGHT),
++        c.get(cv2.CAP_PROP_FPS)))
++
++def mipso_window_init(idx, width, height):
++    cv2.namedWindow(str(idx), cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_FREERATIO)
++    #cv2.namedWindow(str(idx), cv2.WINDOW_NORMAL)
++
++    if WINDOW_WIDTH != 0 and WINDOW_HEIGHT != 0:
++        cur_width = WINDOW_WIDTH
++        cur_height = WINDOW_HEIGHT
++    else:
++        cur_width = int(width // WINDOW_RATIO)
++        cur_height = int(height // WINDOW_RATIO)
++
++    cv2.resizeWindow(str(idx), (cur_width, cur_height))
++    board=0
++    system=0
++    core=0
++    if 'ZEBRA_RUNSESSION_ENABLECORES' in os.environ:
++        c = os.environ['ZEBRA_RUNSESSION_ENABLECORES'].split(':')[0].split('_')
++        if len(c[0]) > 0:
++            board = int(c[0][1:])
++        if len(c) > 1:
++            system = int(c[1][1:])
++        if len(c) > 2:
++            core = int(c[2][1:])
++
++    cur_idx = idx + core + BATCH_PER_SYSTEM * ( system + SYSTEM_PER_BOARD * board)
++    # in case we want to put slide somewhere
++    if cur_idx >= WINDOW_SLIDE_IDX:
++        cur_idx = cur_idx + 1
++    pos_x = WINDOW_X_OFFSET + int( (cur_idx % WINDOW_PER_ROW)*cur_width)
++    pos_y = WINDOW_Y_OFFSET + int( 0 + (cur_idx // WINDOW_PER_ROW)*cur_height)
++
++    print("Move window {} {}x{} for system {} @ ({} , {})".format(idx, cur_width, cur_height, system, pos_x, pos_y))
++    cv2.moveWindow(str(idx), pos_x, pos_y)
++
++def mipso_parse_input(file):
++    mode='file'
++    for part in file.split(':'):
++        if 'camera' == part:
++            mode='camera'
++            continue
++        if part.isdigit():
++            yield mode, int(part)
++        else:
++            mode='file'
++            yield mode, part
++
++
++
++def mipso_opencv_capture(file):
++    """
++    return a list of opencv capture device
++    """
++    camera = []
++    # TODO: use a better handling of the different mode (class)
++    if 'camera' == file:
++        # open all camera
++        camera_idx=0
++        while True:
++            c = cv2.VideoCapture(camera_idx)
++            if c.isOpened() == False:
++                break
++            camera.append(c)
++            mipso_camera_init(c)
++            camera_idx = camera_idx + 1
++    else:
++        for mode, url in mipso_parse_input(file):
++            c = cv2.VideoCapture(url)
++            if c.isOpened() == False:
++                print("Error opening source {} {}".format(mode, url))
++                break
++            if mode == 'camera':
++                mipso_camera_init(c)
++            camera.append(c)
++
++    assert len(camera) > 0, 'Cannot capture source'
++    return camera
++
++# TODO: create a Mipso class
++showHelp = False
++pauseMode = False
++showWindowInfo = SHOW_INFO != 0
++showFps = SHOW_FPS != 0
++
++def mipso_process_key(key):
++    global showHelp
++    global pauseMode
++    global showWindowInfo
++    global showFps
++
++    if pauseMode:
++        print ("pause mode, press 'p' to play or any other key to move to the next frame")
++    while True:
++        if key == 27:
++            return key
++        if key > 0 and chr(key) in 'h':
++            showHelp = not showHelp
++        if key > 0 and chr(key) in 'p':
++            pauseMode = not pauseMode
++        if key > 0 and chr(key) in 'i':
++            showWindowInfo = not showWindowInfo
++        if key > 0 and chr(key) in 'f':
++            showFps = not showFps
++        if not pauseMode or key != -1:
++            break
++        key = cv2.waitKey(1)
++    return key
++
++def print_help(frame):
++
++    HELP="\
++Key usage:\n\
++    ESC : exit the demo\n\
++    h   : toggle displaying this help\n\
++    p   : pause the video (any other key will do frame by frame)\n\
++    i   : toggle showing network information\n\
++    f   : toggle showing FPS\n\
++"
++    scale = 1
++    if frame.shape[1] < 1240:
++        scale = scale * frame.shape[1] / 1240
++    for y, line in enumerate(HELP.split('\n')):
++        cv2.putText(frame, line, (20, int(scale*(200 + y * 40))), cv2.FONT_HERSHEY_SIMPLEX,
++                    scale, (255,255,0), 1)
++
++
++def print_text(frame, x, y, text, scale=1.2):
++    font                   = cv2.FONT_HERSHEY_SIMPLEX
++    bottomLeftCornerOfText = (10,500)
++    fontScale              = scale
++    fontColor              = (0,0,255)
++    lineType               = 2 if scale >= 1 else 1
++
++    cv2.putText(frame, text, (x, y),
++        font,
++        fontScale,
++        fontColor,
++        lineType)
++
++def mipso_window_info(f, idx, name, latency):
++    if showHelp:
++        print_help(f)
++    if showWindowInfo:
++        scale = 1
++        if f.shape[1] < 500:
++            scale = scale * f.shape[1] / 500
++        if showFps:
++            print_text( f, 10, int(scale*30), "Zebra: {} FPS={}".format(name, str(int(1/latency))), scale )
++        else:
++            print_text( f, 10, int(scale*30), "Zebra: {}".format(name), scale)
++        #print_text(f, 10, 50, "Latency is: " + str(int(1000*latency)) + " ms. FPS is: " + str(int(1/latency)) + " img/s")
++
+diff --git a/run b/run
+new file mode 100755
+index 0000000..c1bf3c1
+--- /dev/null
++++ b/run
+@@ -0,0 +1,2 @@
++#! /bin/bash
++python3 run_webcam.py --model=cmu --camera "$@"
+diff --git a/run_webcam.py b/run_webcam.py
+index 27ceaea..f9fdfcf 100644
+--- a/run_webcam.py
++++ b/run_webcam.py
+@@ -8,6 +8,8 @@ import numpy as np
+ from tf_pose.estimator import TfPoseEstimator
+ from tf_pose.networks import get_graph_path, model_wh
+ 
++import mipso_custom
++
+ logger = logging.getLogger('TfPoseEstimator-WebCam')
+ logger.setLevel(logging.DEBUG)
+ ch = logging.StreamHandler()
+@@ -24,7 +26,7 @@ def str2bool(v):
+ 
+ if __name__ == '__main__':
+     parser = argparse.ArgumentParser(description='tf-pose-estimation realtime webcam')
+-    parser.add_argument('--camera', type=int, default=0)
++    parser.add_argument('--camera', type=str, default='0')
+ 
+     parser.add_argument('--resize', type=str, default='0x0',
+                         help='if provided, resize images before they are processed. default=0x0, Recommends : 432x368 or 656x368 or 1312x736 ')
+@@ -37,6 +39,8 @@ if __name__ == '__main__':
+     
+     parser.add_argument('--tensorrt', type=str, default="False",
+                         help='for tensorrt process.')
++    parser.add_argument('--loop', default=False, action='store_true', help='loop video when over')
++    parser.add_argument('--out_file', default=None, help='output path for video')
+     args = parser.parse_args()
+ 
+     logger.debug('initialization %s : %s' % (args.model, get_graph_path(args.model)))
+@@ -46,28 +50,50 @@ if __name__ == '__main__':
+     else:
+         e = TfPoseEstimator(get_graph_path(args.model), target_size=(432, 368), trt_bool=str2bool(args.tensorrt))
+     logger.debug('cam read+')
+-    cam = cv2.VideoCapture(args.camera)
+-    ret_val, image = cam.read()
+-    logger.info('cam image=%dx%d' % (image.shape[1], image.shape[0]))
+ 
++    firstShow = True
++    first_capture = 1
++    cam = mipso_custom.mipso_opencv_capture(args.camera)[0]
++    inf_name = "TF Pose-estimation"
++    print("Press 'ESC' to quit")
+     while True:
+         ret_val, image = cam.read()
++        if image is None or image.size==0:
++            if args.loop:
++                cam.set(cv2.CAP_PROP_POS_FRAMES, 0)
++                print("Reached last frame of video, starting over")
++                continue
++            break
++
++        if first_capture and args.out_file is not None:
++            height, width, _ = image.shape
++            fourcc = cv2.VideoWriter_fourcc(*'XVID')
++            fps = cam.get(cv2.CAP_PROP_FPS)
++            videoWriter = cv2.VideoWriter(args.out_file, fourcc, fps, (width, height))
++            first_capture = 0
+ 
+-        logger.debug('image process+')
++        start_inf = time.time()
+         humans = e.inference(image, resize_to_default=(w > 0 and h > 0), upsample_size=args.resize_out_ratio)
++        took_inf = time.time() - start_inf
+ 
+-        logger.debug('postprocess+')
+         image = TfPoseEstimator.draw_humans(image, humans, imgcopy=False)
+ 
+-        logger.debug('show+')
+-        cv2.putText(image,
+-                    "FPS: %f" % (1.0 / (time.time() - fps_time)),
+-                    (10, 10),  cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+-                    (0, 255, 0), 2)
+-        cv2.imshow('tf-pose-estimation result', image)
+-        fps_time = time.time()
+-        if cv2.waitKey(1) == 27:
+-            break
+-        logger.debug('finished+')
++        mipso_custom.mipso_window_info(image, 0, inf_name, took_inf)
++        if args.out_file is None:
++            if firstShow:
++                height, width, _ = image.shape
++                mipso_custom.mipso_window_init(0, width, height)
++            cv2.imshow("0", image)
++        else:
++            videoWriter.write(image)
++
++        firstShow = False
++
++        if args.out_file is None:
++            choice = cv2.waitKey(1)
++        else:
++            choice = 0
++        choice = mipso_custom.mipso_process_key(choice)
++        if choice == 27: break
+ 
+     cv2.destroyAllWindows()
+diff --git a/tf_pose/estimator.py b/tf_pose/estimator.py
+index 0ccd43b..abff6ff 100644
+--- a/tf_pose/estimator.py
++++ b/tf_pose/estimator.py
+@@ -328,14 +328,16 @@ class TfPoseEstimator:
+             )
+ 
+         self.graph = tf.get_default_graph()
+-        tf.import_graph_def(graph_def, name='TfPoseEstimator')
++        tf.import_graph_def(graph_def, name='TfPoseEstimator', input_map={
++            'preprocess_subtract' : tf.placeholder(tf.float32, shape=[None, None, None, 3], name='zebra_input')
++            })
+         self.persistent_sess = tf.Session(graph=self.graph, config=tf_config)
+ 
+         for ts in [n.name for n in tf.get_default_graph().as_graph_def().node]:
+             print(ts)
+ 
+         self.tensor_image = self.graph.get_tensor_by_name('TfPoseEstimator/image:0')
+-        self.tensor_output = self.graph.get_tensor_by_name('TfPoseEstimator/Openpose/concat_stage7:0')
++        self.tensor_output = tf.placeholder(tf.float32, shape=[None, None, None, 57], name='zebra_output')
+         self.tensor_heatMat = self.tensor_output[:, :, :, :19]
+         self.tensor_pafMat = self.tensor_output[:, :, :, 19:]
+         self.upsample_size = tf.placeholder(dtype=tf.int32, shape=(2,), name='upsample_size')
+@@ -362,27 +364,6 @@ class TfPoseEstimator:
+                                       self.persistent_sess.run(tf.report_uninitialized_variables())]
+              ])
+         )
+-        self.persistent_sess.run(
+-            [self.tensor_peaks, self.tensor_heatMat_up, self.tensor_pafMat_up],
+-            feed_dict={
+-                self.tensor_image: [np.ndarray(shape=(target_size[1], target_size[0], 3), dtype=np.float32)],
+-                self.upsample_size: [target_size[1], target_size[0]]
+-            }
+-        )
+-        self.persistent_sess.run(
+-            [self.tensor_peaks, self.tensor_heatMat_up, self.tensor_pafMat_up],
+-            feed_dict={
+-                self.tensor_image: [np.ndarray(shape=(target_size[1], target_size[0], 3), dtype=np.float32)],
+-                self.upsample_size: [target_size[1] // 2, target_size[0] // 2]
+-            }
+-        )
+-        self.persistent_sess.run(
+-            [self.tensor_peaks, self.tensor_heatMat_up, self.tensor_pafMat_up],
+-            feed_dict={
+-                self.tensor_image: [np.ndarray(shape=(target_size[1], target_size[0], 3), dtype=np.float32)],
+-                self.upsample_size: [target_size[1] // 4, target_size[0] // 4]
+-            }
+-        )
+ 
+         # logs
+         if self.tensor_image.dtype == tf.quint8:
+@@ -550,9 +531,20 @@ class TfPoseEstimator:
+         img = npimg
+         if resize_to_default:
+             img = self._get_scaled_img(npimg, None)[0][0]
++        preprocess = self.persistent_sess.run(
++                self.graph.get_tensor_by_name("TfPoseEstimator/preprocess_subtract:0"),
++                feed_dict={
++                self.tensor_image: [img], self.upsample_size: upsample_size
++                })
++        zebra_out  = self.persistent_sess.run(
++                self.graph.get_tensor_by_name("TfPoseEstimator/Openpose/concat_stage7:0"),
++                feed_dict={
++                "zebra_input:0": preprocess
++                })
+         peaks, heatMat_up, pafMat_up = self.persistent_sess.run(
+             [self.tensor_peaks, self.tensor_heatMat_up, self.tensor_pafMat_up], feed_dict={
+-                self.tensor_image: [img], self.upsample_size: upsample_size
++                "zebra_output:0": zebra_out,
++                self.upsample_size: upsample_size
+             })
+         peaks = peaks[0]
+         self.heatMat = heatMat_up[0]
