@@ -36,13 +36,9 @@ RUN python3 -m pip --no-cache-dir install tensorflow==1.14.0 numpy==1.15.0
 RUN python3 -m pip --no-cache-dir install future==0.18.1        \
                                           h5py==2.7.1           \
                                           cffi==1.13.1          \
-                                          pybind11==2.4.3       \
-                                          onnx==1.5.0
+                                          pybind11==2.4.3
 
-# install torch without gpu support to reduce docker image size
-RUN python3 -m pip --no-cache-dir install torch==1.2.0+cpu -f https://download.pytorch.org/whl/torch_stable.html
 
-# install run_classification dependencies
 RUN python3 -m pip --no-cache-dir install lxml==4.4.2
 
 RUN python3 -m pip --no-cache-dir install tqdm==4.43.0          \
@@ -86,52 +82,6 @@ WORKDIR /home/demo
 
 
 
-######################################################################
-# DEMO:darkflow yoloV2 from https://github.com/thtrieu/darkflow
-######################################################################
-FROM zebra_base AS darkflow
-
-RUN umask 0 && \
-  git clone https://github.com/thtrieu/darkflow && \
-  cd darkflow && \
-  git checkout -b mipso b2aee0000cd2a956b9f1de6dbfef94d53158b7d8
-
-RUN umask 0 && \
-  cd darkflow && \
-  mkdir -p download && \
-  cd download && \
-  echo "Download weights" && \
-  wget https://github.com/pjreddie/darknet/raw/master/cfg/yolov2-voc.cfg && \
-  wget https://pjreddie.com/media/files/yolov2-voc.weights && \
-  wget https://github.com/pjreddie/darknet/raw/master/cfg/yolov2.cfg && \
-  wget https://pjreddie.com/media/files/yolov2.weights && \
-  tail -c +5 yolov2-voc.weights > yolov2-voc_fixed.weights && \
-  rm yolov2-voc.weights
-
-# to merge with above layer when base depencency will be broken
-RUN umask 0 && \
-  cd darkflow && \
-  cd download && \
-  echo "Download weights" && \
-  wget https://github.com/pjreddie/darknet/raw/master/cfg/yolov2-tiny.cfg && \
-  wget https://pjreddie.com/media/files/yolov2-tiny.weights && \
-  tail -c +5 yolov2-tiny.weights > yolov2-tiny_fixed.weights && \
-  rm yolov2-tiny.weights
-
-COPY darkflow.patch /tmp/darkflow.patch
-
-RUN umask 0 && \
-  cd darkflow && \
-  patch -p1 -i /tmp/darkflow.patch
-
-RUN umask 0 && \
-  cd darkflow && \
-  python3 setup.py build_ext --inplace && \
-  python3 ./flow --model download/yolov2-voc.cfg --load download/yolov2-voc_fixed.weights --labels /dev/null --savepb ; test -f built_graph/yolov2-voc.pb && \
-  python3 ./flow --model download/yolov2.cfg --load download/yolov2.weights --labels cfg/coco.names --savepb ; test -f built_graph/yolov2.pb && \
-  python3 ./flow --model download/yolov2-tiny.cfg --load download/yolov2-tiny_fixed.weights --labels cfg/coco.names --savepb ; test -f built_graph/yolov2-tiny.pb && \
-  rm -rf download
-
 
 ######################################################################
 # DEMO:tensorflow-yolo3 yoloV3 from https://github.com/aloyschen/tensorflow-yolo3
@@ -160,83 +110,6 @@ RUN umask 0 && \
   python3 detect.py --save_pb --out_file /dev/null --image_file dog.jpg && \
   rm model_data/yolov3.weights
 
-
-######################################################################
-# DEMO:pytorch_yolo2 pytorch yoloV2 from https://github.com/marvis/pytorch-yolo2
-######################################################################
-FROM zebra_base AS pytorch_yolo2
-
-RUN umask 0 && \
-  git clone https://github.com/marvis/pytorch-yolo2 && \
-  cd pytorch-yolo2 && \
-  git checkout -b mipso 6c7c1561b42804f4d50d34e0df220c913711f064
-
-RUN umask 0 && \
-  cd pytorch-yolo2 && \
-  wget http://pjreddie.com/media/files/yolo.weights
-
-COPY pytorch-yolo2.patch /tmp/pytorch-yolo2.patch
-
-RUN umask 0 && \
-  cd pytorch-yolo2 && \
-  patch -p1 -i /tmp/pytorch-yolo2.patch
-
-
-######################################################################
-# DEMO:yolo2_pytorch pytorch yoloV2 from https://github.com/longcw/yolo2-pytorch
-######################################################################
-FROM zebra_base AS yolo2_pytorch
-
-RUN umask 0 && \
-  git clone https://github.com/longcw/yolo2-pytorch && \
-  cd yolo2-pytorch && \
-  git checkout -b mipso 17056ca69f097a07884135d9031c53d4ef217a6a
-
-COPY wget_google_drive.bash /tmp/wget_google_drive.bash
-
-RUN umask 0 && \
-  cd yolo2-pytorch && \
-  mkdir -p models && \
-  /tmp/wget_google_drive.bash https://drive.google.com/uc?id=0B4pXCfnYmG1WUUdtRHNnLWdaMEU models/yolo-voc.weights.h5 && \
-  [ "$( stat -c '%s' models/yolo-voc.weights.h5 )" = "268676308" ]
-
-
-COPY yolo2-pytorch.patch /tmp/yolo2-pytorch.patch
-
-RUN umask 0 && \
-  cd yolo2-pytorch && \
-  patch -p1 -i /tmp/yolo2-pytorch.patch
-
-RUN umask 0 && \
-  cd yolo2-pytorch && \
-  ./make.sh
-
-######################################################################
-# DEMO:VDSR-Tensorflow VDSR from https://github.com/DevKiHyun/VDSR-Tensorflow
-######################################################################
-FROM zebra_base AS vdsr_tensorflow
-
-RUN umask 0 && \
-  git clone https://github.com/DevKiHyun/VDSR-Tensorflow && \
-  cd VDSR-Tensorflow && \
-  git checkout -b mipso 117bbb2c4b35daadbba9b29a7c8a4e674b0cd349
-
-COPY VDSR-Tensorflow.patch /tmp/VDSR-Tensorflow.patch
-
-RUN umask 0 && \
-  cd VDSR-Tensorflow && \
-  patch -p1 -i /tmp/VDSR-Tensorflow.patch
-
-RUN umask 0 && \
-  cd VDSR-Tensorflow/VDSR && \
-  echo "Freeze model" && \
-  python3 demo.py --save_pb
-
-RUN umask 0 && \
-  cd VDSR-Tensorflow/VDSR && \
-  echo "[runOptimization]\n\tnetworkOptimizers=NeutralMaxpoolAsInput:BOTH,NeutralMaxpoolOnAllElementWise:BOTH,EltWiseBalance:BOTH,ConcatBalance:RUN" > zebra.ini && \
-  echo "[debug]\n\teltWiseType=ELTWISE_OPTIMIZED_OUT" >> zebra.ini && \
-  echo "[quantization]\n\tminimalBatchSize=1" >> zebra.ini
 
 ######################################################################
 # DEMO:Tensorflow-YOLOv3 from https://github.com/kcosta42/Tensorflow-YOLOv3
@@ -312,11 +185,7 @@ FROM zebra_base AS all_common
 
 # now copy all examples
 
-COPY --from=darkflow            /home/demo/ /home/demo/
 COPY --from=tensorflow_yolov3   /home/demo/ /home/demo/
-COPY --from=pytorch_yolo2       /home/demo/ /home/demo/
-COPY --from=yolo2_pytorch       /home/demo/ /home/demo/
-COPY --from=vdsr_tensorflow     /home/demo/ /home/demo/
 COPY --from=tensorflow_yolov3_tiny /home/demo/ /home/demo/
 COPY --from=tf-pose-estimation  /home/demo/ /home/demo/
 
